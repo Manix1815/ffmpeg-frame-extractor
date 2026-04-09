@@ -2,9 +2,19 @@ const express = require('express');
 const ffmpeg = require('fluent-ffmpeg');
 const axios = require('axios');
 const fs = require('fs');
-const path = require('path');
+const { google } = require('googleapis');
 const app = express();
 app.use(express.json());
+
+// ─── GOOGLE DRIVE AUTH ────────────────────────────────────────────────────────
+function getDriveClient() {
+  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+  const auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/drive']
+  });
+  return google.drive({ version: 'v3', auth });
+}
 
 // ─── ENDPOINT ORIGINAL: solo extrae frame (se mantiene por compatibilidad) ───
 app.post('/extract-frame', async (req, res) => {
@@ -56,13 +66,13 @@ app.post('/extract-frame', async (req, res) => {
   }
 });
 
-// ─── ENDPOINT COMBINADO: edita video + extrae fotograma ──────────────────────
-// Devuelve: videoBase64 (video editado) + imageBase64 (frame para caption)
+// ─── ENDPOINT COMBINADO: edita video + sube a Drive + extrae frame ────────────
+// Devuelve: editedFileId, editedFileUrl, imageBase64
 app.post('/process-video', async (req, res) => {
-  const { videoUrl } = req.body;
+  const { videoUrl, folderId } = req.body;
 
-  if (!videoUrl) {
-    return res.status(400).json({ error: 'videoUrl es obligatorio' });
+  if (!videoUrl || !folderId) {
+    return res.status(400).json({ error: 'videoUrl y folderId son obligatorios' });
   }
 
   const timestamp  = Date.now();
@@ -85,7 +95,7 @@ app.post('/process-video', async (req, res) => {
         .on('error', reject);
     });
 
-    // 2. Obtiene duración para calcular el trim final
+    // 2. Obtiene duración para calcular el trim
     const duration = await new Promise((resolve, reject) => {
       ffmpeg.ffprobe(inputPath, (err, metadata) => {
         if (err) return reject(err);
@@ -98,9 +108,9 @@ app.post('/process-video', async (req, res) => {
 
     // 3. Edita el video:
     //    - trim: quita 1s inicio y 1s final
-    //    - setpts: ajusta timestamps + velocidad 101%
-    //    - hflip: espejo horizontal
-    //    - crop: recorta 3% de cada borde
+    //    - velocidad 101%
+    //    - espejo horizontal
+    //    - crop 3% bordes
     const videoFilter = [
       `trim=start=${trimStart}:end=${trimEnd}`,
       `setpts=(PTS-STARTPTS)/1.01`,
@@ -125,7 +135,7 @@ app.post('/process-video', async (req, res) => {
         .run();
     });
 
-    // 4. Extrae fotograma del video YA EDITADO (segundo 2)
+    // 4. Extrae fotograma del video editado (segundo 2)
     await new Promise((resolve, reject) => {
       ffmpeg(outputPath)
         .seekInput(2)
@@ -136,14 +146,41 @@ app.post('/process-video', async (req, res) => {
         .run();
     });
 
-    // 5. Lee ambos archivos en base64
-    const videoBase64 = fs.readFileSync(outputPath).toString('base64');
+    // 5. Sube el video editado a Drive en la carpeta indicada
+    const drive = getDriveClient();
+
+    const uploadResponse = await drive.files.create({
+      requestBody: {
+        name: `edited_${timestamp}.mp4`,
+        parents: [folderId]
+      },
+      media: {
+        mimeType: 'video/mp4',
+        body: fs.createReadStream(outputPath)
+      },
+      fields: 'id'
+    });
+
+    const editedFileId = uploadResponse.data.id;
+
+    // 6. Hace el archivo público para que Blotato pueda acceder
+    await drive.permissions.create({
+      fileId: editedFileId,
+      requestBody: {
+        role: 'reader',
+        type: 'anyone'
+      }
+    });
+
+    const editedFileUrl = `https://drive.google.com/uc?export=download&id=${editedFileId}`;
+
+    // 7. Lee el frame en base64
     const imageBase64 = fs.readFileSync(framePath).toString('base64');
 
-    // 6. Devuelve todo junto
+    // 8. Devuelve todo
     res.json({
-      videoBase64,
-      videoMimeType: 'video/mp4',
+      editedFileId,
+      editedFileUrl,
       imageBase64,
       imageMimeType: 'image/jpeg'
     });
@@ -151,7 +188,7 @@ app.post('/process-video', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   } finally {
-    // Limpia todos los temporales
+    // Limpia temporales locales
     if (fs.existsSync(inputPath))  fs.unlinkSync(inputPath);
     if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
     if (fs.existsSync(framePath))  fs.unlinkSync(framePath);
