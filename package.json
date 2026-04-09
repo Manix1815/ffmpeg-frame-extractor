@@ -8,7 +8,6 @@
   "dependencies": {
     "express": "^4.18.2",
     "axios": "^1.6.0",
-    "fluent-ffmpeg": "^2.1.2",
-    "googleapis": "^140.0.0"
+    "fluent-ffmpeg": "^2.1.2"
   }
 }
