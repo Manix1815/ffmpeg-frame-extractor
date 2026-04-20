@@ -2,7 +2,6 @@ const express = require('express');
 const ffmpeg = require('fluent-ffmpeg');
 const axios = require('axios');
 const fs = require('fs');
-const path = require('path');
 
 const app = express();
 app.use(express.json());
@@ -30,7 +29,7 @@ function cleanup(...paths) {
 }
 
 // ─── /extract-frame ───────────────────────────────────────────────────────────
-// Extrae el frame del segundo 2 como JPG base64 (para thumbnail/caption)
+// SIN CAMBIOS - extrae frame del segundo 2 para el caption de OpenAI
 app.post('/extract-frame', async (req, res) => {
   const { videoUrl } = req.body;
   if (!videoUrl) return res.status(400).json({ error: 'videoUrl es obligatorio' });
@@ -63,14 +62,15 @@ app.post('/extract-frame', async (req, res) => {
 });
 
 // ─── /process-video ───────────────────────────────────────────────────────────
-// Convierte cualquier vídeo a MP4 H.264 1080x1920 (9:16) listo para Instagram Reels
+// NUEVO - convierte cualquier vídeo a MP4 H.264 1080x1920 y devuelve una URL
 app.post('/process-video', async (req, res) => {
   const { videoUrl } = req.body;
   if (!videoUrl) return res.status(400).json({ error: 'videoUrl es obligatorio' });
 
   const timestamp = Date.now();
   const inputPath = `/tmp/input_${timestamp}.mp4`;
-  const outputPath = `/tmp/output_${timestamp}.mp4`;
+  const outputFile = `processed_${timestamp}.mp4`;
+  const outputPath = `/tmp/${outputFile}`;
 
   try {
     await downloadFile(videoUrl, inputPath);
@@ -94,14 +94,43 @@ app.post('/process-video', async (req, res) => {
         .run();
     });
 
-    const videoBase64 = fs.readFileSync(outputPath).toString('base64');
-    res.json({ videoBase64, mimeType: 'video/mp4' });
+    // Devuelve la URL donde Blotato puede descargar el vídeo procesado
+    const host = req.headers.host;
+    const protocol = req.headers['x-forwarded-proto'] || 'https';
+    const processedVideoUrl = `${protocol}://${host}/video/${outputFile}`;
+
+    // Limpia solo el input, el output se mantiene para que Blotato lo descargue
+    cleanup(inputPath);
+
+    // Auto-limpieza del vídeo procesado después de 10 minutos
+    setTimeout(() => cleanup(outputPath), 10 * 60 * 1000);
+
+    res.json({ processedVideoUrl });
 
   } catch (error) {
-    res.status(500).json({ error: error.message });
-  } finally {
     cleanup(inputPath, outputPath);
+    res.status(500).json({ error: error.message });
   }
+});
+
+// ─── /video/:filename ─────────────────────────────────────────────────────────
+// NUEVO - sirve el vídeo procesado para que Blotato lo descargue
+app.get('/video/:filename', (req, res) => {
+  const filename = req.params.filename;
+  
+  // Seguridad: solo permite archivos processed_*.mp4
+  if (!filename.match(/^processed_\d+\.mp4$/)) {
+    return res.status(400).json({ error: 'Archivo no válido' });
+  }
+
+  const filePath = `/tmp/${filename}`;
+  
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Archivo no encontrado o expirado' });
+  }
+
+  res.setHeader('Content-Type', 'video/mp4');
+  res.sendFile(filePath);
 });
 
 // ─── /health ──────────────────────────────────────────────────────────────────
