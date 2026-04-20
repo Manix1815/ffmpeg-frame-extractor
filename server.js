@@ -62,7 +62,8 @@ app.post('/extract-frame', async (req, res) => {
 });
 
 // ─── /process-video ───────────────────────────────────────────────────────────
-// NUEVO - convierte cualquier vídeo a MP4 H.264 1080x1920 y devuelve una URL
+// Convierte cualquier vídeo a MP4 H.264 1080x1920 y devuelve una URL
+// Mantiene el framerate original hasta un máximo de 60fps
 app.post('/process-video', async (req, res) => {
   const { videoUrl } = req.body;
   if (!videoUrl) return res.status(400).json({ error: 'videoUrl es obligatorio' });
@@ -85,9 +86,9 @@ app.post('/process-video', async (req, res) => {
         .addOption('-crf', '23')
         .addOption('-preset', 'fast')
         .addOption('-movflags', '+faststart')
+        .addOption('-r', '60')
         .audioCodec('aac')
         .audioBitrate('128k')
-        .fps(30)
         .output(outputPath)
         .on('end', resolve)
         .on('error', reject)
@@ -114,17 +115,17 @@ app.post('/process-video', async (req, res) => {
 });
 
 // ─── /video/:filename ─────────────────────────────────────────────────────────
-// NUEVO - sirve el vídeo procesado para que Blotato lo descargue
+// Sirve el vídeo procesado para que Blotato lo descargue
 app.get('/video/:filename', (req, res) => {
   const filename = req.params.filename;
-  
+
   // Seguridad: solo permite archivos processed_*.mp4
   if (!filename.match(/^processed_\d+\.mp4$/)) {
     return res.status(400).json({ error: 'Archivo no válido' });
   }
 
   const filePath = `/tmp/${filename}`;
-  
+
   if (!fs.existsSync(filePath)) {
     return res.status(404).json({ error: 'Archivo no encontrado o expirado' });
   }
